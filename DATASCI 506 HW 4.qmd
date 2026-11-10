@@ -1,0 +1,392 @@
+---
+title: "DATASCI 506 HW 4"
+author: "Yiwen Hua"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+---
+
+Answers are on Github at https://github.com/Yiwen-Hua/STATS-506-HW-4.git
+
+## Problem 1
+
+```{r}
+library(tidyverse)
+
+nzge <- read_rds("nzge.rds") |> as_tibble()
+
+glimpse(nzge)
+nzge |> distinct(election_year, voting_type)
+```
+
+### (a)
+
+```{r}
+vote_totals <- nzge |>
+  group_by(election_year, voting_type) |>
+  summarize(total_votes = sum(votes, na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(total_votes))
+
+print(vote_totals, n = Inf)
+```
+
+### (b)
+
+```{r}
+# Keep valid votes for the party comparisons
+valid_votes <- nzge |>
+  filter(!is.na(party), party != "",
+         !str_detect(party, regex("^Informal", ignore_case = TRUE)))
+
+candidate_shares_2014 <- valid_votes |>
+  filter(election_year == 2014, voting_type == "Candidate") |>
+  group_by(party) |>
+  summarize(total_votes = sum(votes, na.rm = TRUE), .groups = "drop") |>
+  mutate(percent = 100 * total_votes / sum(total_votes)) |>
+  arrange(desc(percent))
+
+candidate_shares_2014 |>
+  mutate(percent = round(percent, 2)) |>
+  print(n = Inf)
+```
+
+### (c)
+
+```{r}
+vote_leaders <- valid_votes |>
+  group_by(election_year, voting_type, party) |>
+  summarize(total_votes = sum(votes, na.rm = TRUE), .groups = "drop") |>
+  group_by(election_year, voting_type) |>
+  slice_max(order_by = total_votes, n = 1, with_ties = TRUE) |>
+  ungroup() |>
+  arrange(election_year, voting_type)
+
+print(vote_leaders, n = Inf)
+```
+
+## Problem 2
+
+### (a)
+
+```{r}
+atp <- read_csv("atp_matches_2019.csv", show_col_types = FALSE)
+
+atp |>
+  summarize(tournaments = n_distinct(tourney_id, na.rm = TRUE))
+```
+The 2019 ATP match dataset contained 128 distinct tournament IDs.
+
+### (b)
+
+```{r}
+# Inspect tournament levels and round codes
+atp |> count(tourney_level, round)
+
+# Count distinct finals won by each player
+titles <- atp |>
+  filter(round == "F", !is.na(winner_id)) |>
+  group_by(winner_id) |>
+  summarize(
+    player = first(winner_name),
+    titles = n_distinct(tourney_id, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+titles |>
+  summarize(
+    players_with_multiple_titles = sum(titles > 1),
+    most_titles = max(titles)
+  )
+
+titles |>
+  slice_max(order_by = titles, n = 1, with_ties = TRUE) |>
+  select(player, titles)
+```
+Using recorded singles finals to identify tournament champions, 12 players won more than one tournament. Novak Djokovic and Dominic Thiem tied for the most titles, with five each.
+
+### (c)
+
+```{r}
+ace_comparison <- atp |>
+  drop_na(w_ace, l_ace) |>
+  mutate(ace_diff = w_ace - l_ace) |>
+  summarize(
+    matches = n(),
+    mean_diff = mean(ace_diff),
+    median_diff = median(ace_diff),
+    winner_more_pct = 100 * mean(ace_diff > 0),
+    tied_pct = 100 * mean(ace_diff == 0),
+    loser_more_pct = 100 * mean(ace_diff < 0)
+  )
+
+ace_comparison
+```
+Among the 2,694 matches with ace counts for both players, winners hit more aces in 57.3% of matches, losers hit more in 34.4%, and the counts were equal in 8.35%. Winners averaged 1.70 more aces per match, suggesting that winners tended to hit more aces than losers in this dataset.
+
+### (d)
+
+```{r}
+player_matches <- bind_rows(
+  atp |> transmute(player_id = winner_id, player = winner_name, won = TRUE),
+  atp |> transmute(player_id = loser_id, player = loser_name, won = FALSE)
+)
+
+top_win_rates <- player_matches |>
+  filter(!is.na(player_id)) |>
+  group_by(player_id) |>
+  summarize(
+    player = first(player),
+    matches = n(),
+    wins = sum(won),
+    win_rate = mean(won),
+    .groups = "drop"
+  ) |>
+  filter(matches >= 5) |>
+  slice_max(win_rate, n = 1, with_ties = TRUE) |>
+  mutate(win_rate = scales::percent(win_rate, accuracy = 0.1)) |>
+  select(player, matches, wins, win_rate)
+
+print(top_win_rates, n = Inf)
+```
+Among players who played at least five matches, Rafael Nadal had the highest win rate: 87.0%, with 60 wins in 69 matches.
+
+## Problem 3
+
+```{r}
+covid <- read_csv("us-states.csv", show_col_types = FALSE) |>
+  mutate(date = as.Date(date))
+
+us_cases <- covid |>
+  filter(state %in% state.name, !is.na(cases_avg)) |>
+  group_by(date) |>
+  summarize(daily_avg = sum(cases_avg), .groups = "drop") |>
+  arrange(date)
+
+# Find peaks with a complete 35-day window on each side
+window_days <- 35
+days <- us_cases$date
+cases <- us_cases$daily_avg
+
+# Identify whether a date qualifies as a case peak.
+# Inputs: row index i, ordered dates, daily case averages, and window half-width in days.
+# Returns: one logical value indicating whether the date qualifies.
+is_case_peak <- function(i, days, cases, window_days) {
+  if (days[i] - window_days < min(days) ||
+      days[i] + window_days > max(days)) {
+    return(FALSE)
+  }
+
+  left <- which(days >= days[i] - window_days & days < days[i])
+  right <- which(days > days[i] & days <= days[i] + window_days)
+  window <- c(left, i, right)
+
+  is_peak <- i == window[which.max(cases[window])]
+  rise <- cases[i] - max(min(cases[left]), min(cases[right]))
+
+  is_peak && cases[i] >= 25000 && rise >= 15000
+}
+
+peak_idx <- which(map_lgl(
+  seq_along(days),
+  is_case_peak,
+  days = days,
+  cases = cases,
+  window_days = window_days
+))
+
+spikes <- us_cases |>
+  slice(peak_idx) |>
+  mutate(size = if_else(daily_avg >= 100000, "Major", "Minor"))
+
+spikes |> count(size, name = "peaks")
+spikes |> select(date, size, daily_avg) |> print(n = Inf)
+
+ggplot(us_cases, aes(date, daily_avg)) +
+  geom_line(color = "#34495E", linewidth = 0.55) +
+  geom_point(
+    data = spikes,
+    aes(color = size, shape = size),
+    size = 3
+  ) +
+  scale_color_manual(values = c(Major = "#B23A28", Minor = "#007C78")) +
+  scale_shape_manual(values = c(Major = 17, Minor = 16)) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "COVID-19 case peaks in the 50 U.S. states",
+    subtitle = "Four major and three minor peaks",
+    x = NULL,
+    y = "New reported cases per day (rolling average)",
+    color = NULL,
+    shape = NULL,
+    caption = paste(
+  "A peak is the maximum within ±35 days and rises at least 15,000 cases/day",
+  "above the higher of the two flanking lows.",
+  "Major: ≥100,000 cases/day; minor: ≥25,000 and <100,000.",
+  "Source: The New York Times COVID-19 data.",
+  sep = "\n"
+)
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0)
+  )
+```
+
+Using the stated peak criteria, the 50-state series had four major and three minor peaks. The largest peak occurred on January 14, 2022, at approximately 796,116 reported cases per day. These counts depend on the chosen window and thresholds.
+
+### (b)
+
+```{r}
+state_rates <- covid |>
+  filter(state %in% state.name, !is.na(cases_avg_per_100k)) |>
+  select(date, state, cases_avg_per_100k)
+
+# Rank states using only dates with a rate for all 50 states
+common_dates <- state_rates |>
+  distinct(date, state) |>
+  count(date, name = "states_reporting") |>
+  filter(states_reporting == length(state.name))
+
+state_ranking <- state_rates |>
+  semi_join(common_dates, by = "date") |>
+  group_by(state) |>
+  summarize(
+    overall_rate = mean(cases_avg_per_100k),
+    .groups = "drop"
+  ) |>
+  arrange(desc(overall_rate))
+
+extreme_states <- bind_rows(
+  state_ranking |> slice_max(overall_rate, n = 1) |> mutate(rank = "Highest"),
+  state_ranking |> slice_min(overall_rate, n = 1) |> mutate(rank = "Lowest")
+)
+
+common_dates |>
+  summarize(start = min(date), end = max(date), dates_used = n())
+
+extreme_states |> select(rank, state, overall_rate)
+
+extreme_series <- state_rates |>
+  semi_join(common_dates, by = "date") |>
+  inner_join(extreme_states, by = "state") |>
+  mutate(series = paste0(state, " (", tolower(rank), ")"))
+
+ggplot(extreme_series, aes(date, cases_avg_per_100k, color = series)) +
+  geom_line(linewidth = 0.75) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "COVID-19 trajectories in the highest- and lowest-rate states",
+    subtitle = "States ranked by mean daily reported cases per 100,000",
+    x = NULL,
+    y = "New reported cases per 100,000 per day\n(rolling average)",
+    color = NULL,
+    caption = paste(
+  "States were ranked by mean daily cases per 100,000",
+  "across the 1,102 dates with data for all 50 states.",
+  "Source: The New York Times COVID-19 data.",
+  sep = "\n")
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0)
+  )
+```
+
+```{r}
+extreme_series |>
+  group_by(state) |>
+  slice_max(cases_avg_per_100k, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(state, date, peak_rate = cases_avg_per_100k)
+```
+Across the 1,102 dates with data for all 50 states, Rhode Island had the highest mean daily reported case rate (39.3 per 100,000), and Maine had the lowest (20.0 per 100,000). Rhode Island peaked earlier and much higher, at about 507 per 100,000 on January 11, 2022, compared with Maine’s peak of 81.2 on February 23, 2022.
+
+
+### (c)
+
+```{r}
+threshold <- 1
+required_days <- 7
+
+onsets <- state_rates |>
+  group_by(state) |>
+  arrange(date, .by_group = TRUE) |>
+  mutate(
+    above = cases_avg_per_100k >= threshold,
+    new_run = above & (
+      !lag(above, default = FALSE) |
+        date != lag(date, default = first(date)) + 1
+    ),
+    run_id = cumsum(new_run)
+  ) |>
+  filter(above) |>
+  group_by(state, run_id) |>
+  summarize(onset = min(date), days_above = n(), .groups = "drop") |>
+  filter(days_above >= required_days) |>
+  group_by(state) |>
+  summarize(onset = min(onset), .groups = "drop")
+
+first_states <- onsets |>
+  slice_min(onset, n = 5, with_ties = TRUE) |>
+  arrange(onset, state)
+
+first_states
+```
+
+```{r}
+early_series <- state_rates |>
+  inner_join(first_states, by = "state") |>
+  filter(
+    date >= min(first_states$onset) - 14,
+    date <= max(first_states$onset) + 21
+  ) |>
+  mutate(state = factor(state, levels = first_states$state))
+
+onset_points <- early_series |>
+  filter(date == onset)
+
+ggplot(early_series, aes(date, cases_avg_per_100k)) +
+  geom_hline(
+    yintercept = threshold,
+    linetype = "dashed",
+    color = "#777777"
+  ) +
+  geom_line(color = "#245A81", linewidth = 0.8) +
+  geom_point(data = onset_points, color = "#B23A28", size = 2.6) +
+  facet_wrap(vars(state), ncol = 2) +
+  scale_x_date(date_breaks = "2 weeks", date_labels = "%b %d") +
+  labs(
+    title = "Where sustained COVID-19 reporting began first",
+    subtitle = "Dots mark the first day of seven consecutive days at or above the threshold",
+    x = NULL,
+    y = "Daily reported cases per 100,000\n(rolling average)",
+    caption = paste(
+  "Dashed line: 1 reported case per 100,000 per day.",
+  "Michigan and Vermont tied for fifth, so both are shown.",
+  "Source: The New York Times COVID-19 data.",
+  sep = "\n"
+)
+)+
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0)
+  )
+```
+Using the first day of seven consecutive days with at least one reported case per 100,000 per day as the onset, Washington qualified first on March 15, 2020, followed by New York on March 18 and Louisiana and New Jersey on March 19. Michigan and Vermont tied for fifth on March 21, so both are shown. These dates reflect sustained reported case rates rather than the first infections.
